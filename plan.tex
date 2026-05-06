@@ -1,0 +1,335 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{titlesec}
+\usepackage{xcolor}
+\usepackage{listings}
+
+\titleformat{\section}{\large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{1em}{}
+
+\setlength{\parskip}{0.5em}
+\setlength{\parindent}{0pt}
+
+\title{\textbf{Behavioral Clustering of Sports Prediction Markets}\\[0.3em]
+\large Do Kalshi sports markets cluster into distinct behavioral types --- and are some of them mispriced?}
+\author{William Walz \& Indigo Lee \\ Math 364 --- Machine Learning in Asset Pricing}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{The Core Idea}
+
+Sports prediction markets on Kalshi don't all behave the same way. An NFL game-line contract that resolves in three hours has different price dynamics than an NBA championship futures contract that resolves in seven months. Some markets walk steadily toward truth as information arrives; others stay flat and jump only at resolution; others oscillate noisily without clear directional drift.
+
+We use K-means clustering to group resolved Kalshi sports contracts by their \textit{pre-resolution price dynamics} --- features like volatility, drift, time-to-resolution decay, and end-jump size. Then we ask two questions:
+
+\textbf{Q1 (the main question):} Do sports markets cluster into distinct behavioral types? And do those clusters correspond to sport / league / market type, or cut across them in interesting ways?
+
+\textbf{Q2 (the bonus, calibration check):} Are any of these behavioral clusters systematically mispriced? For each cluster, do contracts priced at 70\% actually resolve YES 70\% of the time?
+
+\textbf{The pitch:} Kalshi organizes sports contracts by sport and league. We argue that contracts cluster more naturally by behavior --- and some behavioral clusters reveal pricing inefficiencies that the sport-based organization hides.
+
+\section{Tech Stack \& Division of Labor}
+
+\textbf{Python} (data + analysis + dashboard)
+\begin{itemize}[leftmargin=*, itemsep=0pt]
+    \item \texttt{requests} for Kalshi REST API
+    \item \texttt{pandas} for panel construction and feature engineering
+    \item \texttt{scikit-learn} for K-means
+    \item \texttt{streamlit} for the data console
+    \item \texttt{sqlite3} (stdlib) for local API caching
+    \item Output: cleaned CSVs and a results JSON
+\end{itemize}
+
+\textbf{R} (visualization + presentation graphics)
+\begin{itemize}[leftmargin=*, itemsep=0pt]
+    \item \texttt{ggplot2} for all plots
+    \item \texttt{tidyverse} for any final reshaping
+    \item Indigo's \texttt{theme\_kalshi()} from his previous project --- reuse it directly
+\end{itemize}
+
+\textbf{Claude Code} for the Python pipeline. William writes prompts in his Claude chat, pastes them into Claude Code.
+
+\textbf{Why split:} R's ggplot output is cleaner for slides, and Indigo already has the Kalshi-themed styling infrastructure. Python handles everything upstream where iteration is heavier.
+
+\section{The Kalshi API Problem}
+
+The Kalshi API has real friction points that need to be addressed before any analysis. Indigo hit several of these in his previous project, including a live-data section that couldn't even render because December 8th data had already aged off the API by compile time.
+
+Specific issues:
+\begin{itemize}[leftmargin=*, itemsep=0pt]
+    \item Resolved contracts roll off the API after some weeks --- pulls have to happen before the data ages out
+    \item Candle endpoints have time-window limits per request --- date ranges have to be chunked
+    \item Ticker discovery requires hitting multiple endpoints (markets, events, series) and reconciling
+    \item Rate limits exist but are not documented well
+    \item Many tickers return zero candles or flat prices, so blind iteration produces noise
+\end{itemize}
+
+\textbf{Solution:} Build a local data console (Section 5, Session 0) that wraps the API in an interactive Streamlit dashboard backed by a SQLite cache. The console is the working environment for the entire project --- not a side tool. Once data is cached locally, it's preserved regardless of API state.
+
+\section{Data Specification}
+
+\textbf{Universe.} Resolved Kalshi sports contracts. Scope determined by what's available --- start with whichever sport(s) have the most contracts and cleanest candle data, expand from there. Likely to include NFL, NBA, MLB, and championship/futures contracts across major leagues.
+
+\textbf{Time range.} Past 12--18 months of resolved contracts, depending on how far back the API allows clean retrieval.
+
+\textbf{Target sample size.} 100--250 resolved contracts. Sports contracts are abundant on Kalshi, so we can afford a larger universe than the previous proposal.
+
+\textbf{Frequency.} Hourly or daily candles depending on contract duration. NFL game-line contracts (resolving in hours) need finer granularity; championship futures (resolving in months) work fine on daily.
+
+\textbf{Filters.}
+\begin{itemize}[leftmargin=*, itemsep=0pt]
+    \item Contract must have at least 20 non-missing price observations during its lifetime
+    \item Average daily volume $\geq 50$ contracts (tune as needed)
+    \item Resolved contracts only --- we need known outcomes for both clustering features and calibration
+    \item Exclude contracts where price was effectively flat (degenerate features)
+\end{itemize}
+
+\textbf{Caching.} All API responses go through a local SQLite DB (\texttt{data/kalshi\_cache.db}) so re-runs are free and the data is preserved against the API ageing it out.
+
+\section{Methodology}
+
+\subsection{Feature engineering}
+
+For each resolved contract, compute a small set of behavioral features from its price path. These are the inputs to clustering.
+
+\textbf{Core features (clustering inputs):}
+\begin{itemize}[leftmargin=*, itemsep=0pt]
+    \item \textbf{Realized volatility:} standard deviation of log-odds changes over the contract's lifetime
+    \item \textbf{Directional drift:} average signed change toward the eventual outcome (positive if price walks toward truth, negative if it walks away)
+    \item \textbf{Time-to-resolution decay:} fraction of total price movement that occurs in the final 25\% of the contract's lifetime (high = late-jumper, low = smooth-mover)
+    \item \textbf{End-jump magnitude:} absolute price change in the final 5\% of the contract's lifetime
+    \item \textbf{Path linearity:} $R^2$ of a linear regression of price on time --- high $R^2$ means smooth steady drift, low $R^2$ means oscillation
+    \item \textbf{Closing price level:} final price before resolution (controls for whether the contract resolved at high or low confidence)
+\end{itemize}
+
+\textbf{Metadata (kept for cluster interpretation, not used in clustering):}
+\begin{itemize}[leftmargin=*, itemsep=0pt]
+    \item Sport (NFL, NBA, MLB, etc.)
+    \item League / market type (game-line, season-long futures, championship, etc.)
+    \item Contract duration (hours to months)
+    \item Resolution outcome (YES = 1, NO = 0)
+\end{itemize}
+
+All features are standardized (z-scored) before clustering.
+
+\subsection{K-means clustering}
+
+Run K-means on the standardized feature matrix.
+
+\textbf{Choosing K:} Run $K = 2$ through $K = 10$. Use elbow method (within-cluster sum of squares) and silhouette scores. Pick the K with the best silhouette score that's also interpretable.
+
+\textbf{Outputs:}
+\begin{itemize}[leftmargin=*, itemsep=0pt]
+    \item Cluster assignments for each contract
+    \item Per-cluster summary: mean feature values, dominant sports/leagues, descriptive label (e.g., ``smooth predictors,'' ``late-jumpers,'' ``noise traders'')
+    \item Cluster $\times$ sport confusion matrix
+    \item Cluster $\times$ market-type confusion matrix
+\end{itemize}
+
+\subsection{Calibration check (Q2 bonus)}
+
+For each cluster, test whether prices match outcomes.
+
+\textbf{Method:} Within each cluster, bin contracts by their closing price into deciles (0--10\%, 10--20\%, etc.). Compute the empirical resolution rate within each bin. A perfectly calibrated cluster has bin midpoint $\approx$ empirical YES rate.
+
+\textbf{Outputs:}
+\begin{itemize}[leftmargin=*, itemsep=0pt]
+    \item Calibration plot per cluster (predicted vs.\ realized probability)
+    \item Brier score per cluster: $\text{Brier} = \frac{1}{N} \sum (p_i - y_i)^2$ where $p_i$ is closing price and $y_i$ is realized outcome
+    \item Identify any clusters with systematic over- or under-pricing
+\end{itemize}
+
+\textbf{Caveat:} With 100--250 contracts split across $K$ clusters, calibration estimates per cluster will be noisy. We frame this as suggestive evidence, not definitive --- but a cluster with strongly biased calibration is worth flagging.
+
+\subsection{Robustness checks}
+
+\begin{itemize}[leftmargin=*, itemsep=0pt]
+    \item Try hierarchical clustering as a backup; report whichever produces cleaner clusters
+    \item Run clustering on subsamples (e.g., NFL only, NBA only) to check whether clusters are sport-specific or cross-cutting
+\end{itemize}
+
+\section{Step-by-Step Execution Plan}
+
+\subsection*{Session 0: Data Console (1.5 hours)}
+\textbf{Goal:} Working Streamlit dashboard wrapping the Kalshi API with SQLite caching.
+
+The console is the project's working environment. Functions written here become the backend for Sessions 1--3.
+
+Four tabs:
+\begin{itemize}[leftmargin=*, itemsep=0pt]
+    \item \textbf{Contract browser:} Filter by sport, league, status, date range. Sortable table with click-through to price chart.
+    \item \textbf{Pull progress:} Live progress for data pulls --- tickers attempted, successes, failures, candles per ticker.
+    \item \textbf{Panel diagnostics:} Loaded panel summary, missing-data heatmap, contracts flagged as suspicious.
+    \item \textbf{Quick cluster preview:} Compute features and run K-means on whatever's loaded; show cluster sizes and silhouette score.
+\end{itemize}
+
+\textbf{Deliverable:} \texttt{console.py} (Streamlit dashboard) and \texttt{kalshi\_lib/} (shared backend).
+
+\subsection*{Session 1: Data Pull (2 hours)}
+\textbf{Goal:} Clean panel of resolved sports contracts.
+
+Done through the console. Browse, filter, trigger pulls interactively. Final \texttt{python/01\_pull\_data.py} script is exported at the end for reproducibility.
+
+\begin{itemize}[leftmargin=*, itemsep=0pt]
+    \item Use the contract browser to identify target sports tickers
+    \item Run pulls from the dashboard, monitor progress in real time
+    \item Apply filters (liquidity, completeness, resolution status)
+    \item Save raw candles to \texttt{data/raw\_candles.csv}, resolutions to \texttt{data/resolutions.csv}
+    \item All API responses cached to \texttt{data/kalshi\_cache.db}
+\end{itemize}
+\textbf{Deliverable:} Raw candle data + resolution outcomes for 100--250 sports contracts.
+
+\subsection*{Session 2: Feature Engineering (1.5 hours)}
+\textbf{Goal:} Per-contract feature matrix ready for clustering.
+
+\begin{itemize}[leftmargin=*, itemsep=0pt]
+    \item For each contract, compute the six core features (volatility, drift, decay, end-jump, linearity, closing price)
+    \item Attach metadata (sport, league, market type, duration, outcome)
+    \item Z-score the core features
+    \item Sanity check: distributions of each feature, correlations between features
+\end{itemize}
+\textbf{Deliverable:} \texttt{data/features.csv} with shape (N contracts $\times$ 6 features + metadata).
+
+\subsection*{Session 3: Clustering (1.5 hours)}
+\textbf{Goal:} Cluster assignments and cluster-level diagnostics.
+
+\begin{itemize}[leftmargin=*, itemsep=0pt]
+    \item Run K-means for $K = 2$ to $10$, save WSS and silhouette scores
+    \item Pick best K, finalize assignments
+    \item Build cluster summary table (mean features per cluster, sport composition, market-type composition)
+    \item Manually label each cluster with a descriptive name
+    \item Confusion matrices: cluster $\times$ sport, cluster $\times$ market type
+\end{itemize}
+\textbf{Deliverable:} \texttt{results/clusters.csv} with contract $\to$ cluster mapping, plus diagnostics JSON.
+
+\subsection*{Session 4: Calibration Bonus (1 hour)}
+\textbf{Goal:} Per-cluster calibration analysis.
+
+\begin{itemize}[leftmargin=*, itemsep=0pt]
+    \item For each cluster, bin contracts by closing price (deciles)
+    \item Compute empirical YES rate per bin
+    \item Compute Brier score per cluster
+    \item Flag clusters with systematic mispricing
+\end{itemize}
+\textbf{Deliverable:} \texttt{results/calibration.csv} with per-cluster calibration data.
+
+\subsection*{Session 5: Visualization in R (1.5 hours)}
+\textbf{Goal:} All final plots ready.
+
+Read Python output CSVs into R, make all plots with \texttt{theme\_kalshi()}:
+\begin{enumerate}[leftmargin=*, itemsep=0pt]
+    \item Feature distribution plots (faceted by sport)
+    \item Elbow + silhouette plots for K selection
+    \item Cluster scatter (any 2D projection of features, colored by cluster)
+    \item Cluster $\times$ sport confusion matrix as a tile plot
+    \item Cluster $\times$ market type confusion matrix as a tile plot
+    \item Per-cluster calibration plots (predicted vs.\ realized probability)
+    \item Bar chart of Brier scores by cluster
+    \item Example price paths from each cluster (representative contracts)
+\end{enumerate}
+\textbf{Deliverable:} \texttt{figures/} directory with publication-quality plots.
+
+\subsection*{Session 6: Slides + Writeup (1.5 hours)}
+\textbf{Goal:} Slide deck and short writeup done.
+\begin{itemize}[leftmargin=*, itemsep=0pt]
+    \item 10-slide deck (structure below)
+    \item 2-page methodology + results writeup
+    \item Final code cleanup, README
+    \item Optional: rehearse a live demo of the dashboard
+\end{itemize}
+\textbf{Deliverable:} \texttt{presentation.pdf}, \texttt{writeup.pdf}, GitHub repo.
+
+\textbf{Total: $\sim$10.5 hours over 7 sessions.} One session per day, doable in a week.
+
+\section{Slide Deck Structure (10 slides)}
+
+\begin{enumerate}[leftmargin=*, itemsep=0pt]
+    \item \textbf{Title} --- ``Behavioral Clustering of Sports Prediction Markets'' --- William Walz \& Indigo Lee, Math 364
+    \item \textbf{Motivation} --- Sports markets don't all behave the same. Some walk smoothly toward truth, some jump at the end, some oscillate. We cluster them by behavior and check for mispricing.
+    \item \textbf{Data + Console} --- Kalshi REST API, $\sim$N resolved sports contracts, daily/hourly candles. Brief mention of the dashboard. Optional live demo.
+    \item \textbf{Methods} --- Six behavioral features per contract $\to$ K-means $\to$ named clusters. Calibration check per cluster as bonus.
+    \item \textbf{Result 1: Clusters identified} --- Show K, silhouette score, and named cluster types with example contracts.
+    \item \textbf{Result 2: Cluster $\times$ sport} --- Confusion matrix. Highlight cases where behavioral clusters cut across sport boundaries.
+    \item \textbf{Result 3: Cluster $\times$ market type} --- Same for market type. Tells us whether clusters reflect contract structure or sport.
+    \item \textbf{Result 4: Calibration} --- Per-cluster calibration plots. Identify any cluster with systematic mispricing.
+    \item \textbf{Implication} --- ``Kalshi sports contracts cluster behaviorally in ways that don't match sport/league boundaries. Cluster X shows systematic mispricing.''
+    \item \textbf{Limitations \& next steps} --- Sample size, single platform, calibration noise. Future: out-of-sample test, larger sample, real-time deployment.
+\end{enumerate}
+
+\section{Repo Structure}
+
+\begin{verbatim}
+kalshi-sports-clustering/
+|-- CLAUDE.md
+|-- README.md
+|-- console.py              # Streamlit dashboard
+|-- kalshi_lib/             # shared backend code
+|   |-- api.py              # API wrapper with SQLite caching
+|   |-- features.py         # feature engineering
+|   |-- cluster.py          # K-means + diagnostics
+|   `-- calibration.py      # calibration analysis
+|-- python/                 # final reproducible scripts
+|   |-- 01_pull_data.py
+|   |-- 02_features.py
+|   |-- 03_cluster.py
+|   `-- 04_calibration.py
+|-- r/
+|   `-- plots.R
+|-- data/
+|   |-- kalshi_cache.db     # SQLite cache
+|   |-- raw_candles.csv
+|   |-- resolutions.csv
+|   `-- features.csv
+|-- results/
+|   |-- clusters.csv
+|   `-- calibration.csv
+|-- figures/
+|   `-- *.png
+`-- presentation.pdf
+\end{verbatim}
+
+\textbf{Workflow rule:} Backend logic lives in \texttt{kalshi\_lib/}. Both \texttt{console.py} and the final \texttt{python/} scripts call those functions --- no logic is written twice.
+
+\section{Risks \& Mitigations}
+
+\textbf{Risk: Kalshi API rate limits or contract availability gaps.}\\
+\textit{Mitigation:} SQLite cache and Session 0 dashboard exist precisely for this. Pull aggressively early, work from cache afterward.
+
+\textbf{Risk: Resolved contracts age off the API mid-project.}\\
+\textit{Mitigation:} Pull and cache during Sessions 0--1. Once cached, data is preserved locally.
+
+\textbf{Risk: Clusters look noisy or non-interpretable.}\\
+\textit{Mitigation:} Try hierarchical clustering as a backup. Reduce feature count if features are redundant. If clusters still look bad, that's itself a finding (``sports markets don't separate cleanly by these features'') --- frame substantively.
+
+\textbf{Risk: Calibration estimates are too noisy per cluster.}\\
+\textit{Mitigation:} Frame calibration as suggestive, not definitive. Pool across clusters as a sanity check. If individual cluster calibration is unreliable, report aggregate calibration and per-sport calibration as alternatives.
+
+\textbf{Risk: One sport dominates the universe and washes out cross-sport patterns.}\\
+\textit{Mitigation:} Stratify the universe selection during Session 1. Use the dashboard to ensure reasonable representation across sports.
+
+\textbf{Risk: Streamlit dashboard becomes a time sink.}\\
+\textit{Mitigation:} Keep it minimal --- four tabs, no styling beyond defaults. Functional visibility, not polish.
+
+\section{Roadmap of Future Prompts}
+
+When ready to start, William will request prompts in this order from his Claude chat:
+
+\begin{enumerate}[leftmargin=*, itemsep=0pt]
+    \item ``Write the API wrapper and SQLite cache layer in \texttt{kalshi\_lib/api.py}.''
+    \item ``Write the Streamlit data console (\texttt{console.py}) with the four tabs.''
+    \item ``Write the feature engineering code in \texttt{kalshi\_lib/features.py}.''
+    \item ``Write the K-means clustering code in \texttt{kalshi\_lib/cluster.py} with K-selection diagnostics.''
+    \item ``Write the calibration analysis code in \texttt{kalshi\_lib/calibration.py}.''
+    \item ``Write the four reproducible scripts in \texttt{python/01\_*} through \texttt{python/04\_*} that wrap \texttt{kalshi\_lib/} for non-interactive runs.''
+    \item ``Write the R plotting script --- all plots using \texttt{theme\_kalshi()}.''
+\end{enumerate}
+
+Each prompt is generated tailored to what came before so the pipeline composes cleanly.
+
+\end{document}
