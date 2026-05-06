@@ -1,0 +1,5 @@
+cluster,n_markets,avg_final_prob,yes_rate,mispricing,dominant_sport,behavioral_description
+0,453,0.1626710816777042,0.141280353200883,-0.02139072847682119,half_spread,"Stable underdog: consistently priced below 25%, resolved NO ~86% of the time. Low volatility (0.040), almost no time near 50% (2%). Outcome was largely anticipated from market open."
+1,286,0.8536363636363636,0.8391608391608392,-0.01447552447552447,team_total,"Strong late-converging favorite: started near 50/50, resolved YES ~84% of the time with a large intraday range (0.73) and decisive final-day move (+0.48 in 24h)."
+2,177,0.1377401129943503,0.15819209039548024,0.020451977401129945,half_total,"Volatile near-miss underdog: spent 46% of lifetime near 50% before resolving NO ~84% of the time. Large range (0.59), strong late-day drift (-0.29 in 24h). These markets appeared contested before the crowd shifted decisively toward NO."
+3,30,0.3276666666666666,0.26666666666666666,-0.06099999999999994,series_outcome,Long-duration markets (~14 days open). Dominant type: series_outcome. Low short-term volatility (0.046); final prob=0.33; YES rate=27%.
